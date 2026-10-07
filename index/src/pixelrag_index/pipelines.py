@@ -372,8 +372,11 @@ def build(config: dict, limit: int | None = None, force: bool = False) -> Path:
 
     # Stage 3: Embed chunks to vectors
     logger.info("Stage 3/4: Embedding chunks (device=%s)...", device)
-    if device in ("cpu", "mps", "auto"):
-        # Local embedder: CPU, Apple MPS, or auto-detect
+    if device in ("cpu", "mps", "auto") or embed_cfg.get("backend") == "transformers":
+        # Local transformers embedder: CPU, Apple MPS, auto-detect, or an
+        # explicit CUDA fallback for compact offline evaluation indexes.  The
+        # latter keeps PixelRAG's rendering/chunking/FAISS pipeline but avoids
+        # requiring an optional long-lived vLLM/SGLang service.
         cmd = [
             sys.executable,
             "-m",
