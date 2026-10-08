@@ -245,7 +245,11 @@ def build(config: dict, limit: int | None = None, force: bool = False) -> Path:
         if not _needs_render(tiles_dir, idx, doc):
             continue  # already rendered for this same document
         try:
-            render_pdf(doc.path, str(tiles_dir), stem=str(idx))
+            pdf_render = config.get("pdf_render")
+            if pdf_render is None:
+                render_pdf(doc.path, str(tiles_dir), stem=str(idx))
+            else:
+                render_pdf(doc.path, str(tiles_dir), stem=str(idx), **pdf_render)
         except Exception as e:
             logger.warning("  FAILED PDF %s: %s", doc.id, e)
     if pdf_docs:
