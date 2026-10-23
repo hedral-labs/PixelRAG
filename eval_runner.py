@@ -62,6 +62,7 @@ class IndexManifest:
     embedding_model: str
     index_backend: str
     manifest_sha256: str
+    pdf_render: Mapping[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -148,10 +149,23 @@ def _read_json(path: Path, code: str) -> object:
 def _manifest(index_path: Path, *, expected_index_name: str | None = None) -> IndexManifest:
     manifest_path = index_path / _INDEX_MANIFEST
     raw = _read_json(manifest_path, "index_manifest_invalid")
-    if not isinstance(raw, Mapping) or set(raw) != {
+    fields = {
         "schema_version", "index_name", "document_id", "source_id", "source_sha256",
         "page_count", "embedding_model", "index_backend", "created_at",
-    }:
+    }
+    if not isinstance(raw, Mapping) or set(raw) not in (fields, fields | {"pdf_render"}):
+        raise RunnerInputError("index_manifest_invalid")
+    pdf_render = raw.get("pdf_render")
+    if "pdf_render" in raw and (
+        not isinstance(pdf_render, Mapping)
+        or set(pdf_render) != {"dpi", "quality"}
+        or not isinstance(pdf_render.get("dpi"), int)
+        or isinstance(pdf_render.get("dpi"), bool)
+        or not 72 <= pdf_render["dpi"] <= 600
+        or not isinstance(pdf_render.get("quality"), int)
+        or isinstance(pdf_render.get("quality"), bool)
+        or not 1 <= pdf_render["quality"] <= 100
+    ):
         raise RunnerInputError("index_manifest_invalid")
     manifest = IndexManifest(
         index_name=_safe_name(raw.get("index_name"), "index_manifest_invalid"),
@@ -162,6 +176,7 @@ def _manifest(index_path: Path, *, expected_index_name: str | None = None) -> In
         embedding_model=_nonblank(raw.get("embedding_model"), "index_manifest_invalid"),
         index_backend=_nonblank(raw.get("index_backend"), "index_manifest_invalid"),
         manifest_sha256=_file_sha256(manifest_path),
+        pdf_render=pdf_render,
     )
     if raw.get("schema_version") != INDEX_SCHEMA or manifest.index_name != (
         expected_index_name or index_path.name
@@ -231,6 +246,7 @@ def _validate_index_layout(index_path: Path, manifest: IndexManifest) -> None:
         tiles.get("article_id") != 0
         or tiles.get("complete") is not True
         or tiles.get("total_pages") != manifest.page_count
+        or (manifest.pdf_render is not None and tiles.get("dpi") != manifest.pdf_render["dpi"])
         or not isinstance(tiles.get("source"), str)
         or chunks.get("article_id") != 0
         or chunks.get("num_chunks") != manifest.page_count
@@ -527,6 +543,8 @@ def _build_index(
     embedding_model: str,
     device: str,
     overwrite: bool,
+    render_dpi: int | None = None,
+    jpeg_quality: int | None = None,
     builder: Callable[[dict[str, object]], Path] | None = None,
 ) -> dict[str, object]:
     """Explicitly build and atomically publish the narrow evaluation index."""
@@ -534,6 +552,13 @@ def _build_index(
         raise RunnerInputError("input_document_missing")
     if _file_sha256(source) != source_sha256:
         raise RunnerInputError("input_document_checksum_mismatch")
+    if (render_dpi is None) != (jpeg_quality is None):
+        raise RunnerInputError("pdf_render_invalid")
+    if render_dpi is not None and (
+        isinstance(render_dpi, bool) or not isinstance(render_dpi, int) or not 72 <= render_dpi <= 600
+        or isinstance(jpeg_quality, bool) or not isinstance(jpeg_quality, int) or not 1 <= jpeg_quality <= 100
+    ):
+        raise RunnerInputError("pdf_render_invalid")
     index_root.mkdir(parents=True, exist_ok=True)
     target = _index_path(index_root, index_name)
     if target.exists() and not overwrite:
@@ -549,6 +574,8 @@ def _build_index(
             "embed": {"model": embedding_model, "device": device, "backend": "transformers"},
             "index": {"backend": "faiss"},
         }
+        if render_dpi is not None:
+            config["pdf_render"] = {"dpi": render_dpi, "quality": jpeg_quality}
         if builder is None:
             from pixelrag_index.pipelines import build
 
@@ -561,6 +588,8 @@ def _build_index(
         if not isinstance(tiles, Mapping):
             raise RunnerInputError("index_build_invalid")
         page_count = _positive_int(tiles.get("total_pages"), "index_build_invalid", maximum=20_000)
+        if render_dpi is not None and tiles.get("dpi") != render_dpi:
+            raise RunnerInputError("index_build_invalid")
         manifest = {
             "schema_version": INDEX_SCHEMA,
             "index_name": index_name,
@@ -572,6 +601,8 @@ def _build_index(
             "index_backend": "faiss",
             "created_at": _utc_now(),
         }
+        if render_dpi is not None:
+            manifest["pdf_render"] = {"dpi": render_dpi, "quality": jpeg_quality}
         (build_path / _INDEX_MANIFEST).write_text(
             json.dumps(manifest, sort_keys=True, separators=(",", ":")), encoding="utf-8"
         )
@@ -607,6 +638,8 @@ def _parser() -> argparse.ArgumentParser:
     index.add_argument("--embedding-model", default="Qwen/Qwen3-VL-Embedding-2B")
     index.add_argument("--device", default="cuda", choices=["auto", "cpu", "mps", "cuda"])
     index.add_argument("--overwrite", action="store_true")
+    index.add_argument("--render-dpi", type=int, default=None, help="Explicit PDF render DPI for a new index")
+    index.add_argument("--jpeg-quality", type=int, default=None, help="Explicit PDF tile JPEG quality for a new index")
     return parser
 
 
@@ -621,6 +654,8 @@ def _index(arguments: argparse.Namespace) -> dict[str, object]:
         embedding_model=_nonblank(arguments.embedding_model, "embedding_model_missing"),
         device=_nonblank(arguments.device, "device_missing"),
         overwrite=arguments.overwrite,
+        render_dpi=arguments.render_dpi,
+        jpeg_quality=arguments.jpeg_quality,
     )
 
 

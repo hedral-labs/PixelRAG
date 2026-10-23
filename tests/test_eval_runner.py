@@ -265,6 +265,47 @@ def test_atomic_index_build_validation_uses_the_target_name_not_the_temporary_di
         eval_runner._load_index(build_path)
 
 
+def test_experimental_pdf_render_settings_are_persisted_and_validated(tmp_path: Path) -> None:
+    index = _write_index(tmp_path)
+    path = index / eval_runner._INDEX_MANIFEST
+    manifest = json.loads(path.read_text())
+    manifest["pdf_render"] = {"dpi": 300, "quality": 95}
+    path.write_text(json.dumps(manifest))
+    tile_path = index / "tiles/0.png.tiles/tiles.json"
+    tiles = json.loads(tile_path.read_text())
+    tiles["dpi"] = 300
+    tile_path.write_text(json.dumps(tiles))
+    assert eval_runner._load_index(index).pdf_render == {"dpi": 300, "quality": 95}
+    tiles["dpi"] = 200
+    tile_path.write_text(json.dumps(tiles))
+    with pytest.raises(eval_runner.RunnerInputError, match="index_data_invalid"):
+        eval_runner._load_index(index)
+    manifest["pdf_render"]["quality"] = 101
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(eval_runner.RunnerInputError, match="index_manifest_invalid"):
+        eval_runner._load_index(index)
+
+
+def test_experimental_render_settings_reach_only_pdf_build_config(tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"synthetic PDF for configuration test")
+    captured = {}
+
+    def builder(config: dict[str, object]) -> Path:
+        captured.update(config)
+        return Path(config["output"])
+
+    with pytest.raises(eval_runner.RunnerInputError, match="index_build_invalid"):
+        eval_runner._build_index(
+            source=source, index_root=tmp_path / "indexes", index_name="new-index",
+            document_id="fsae_rules_2024_v1", source_id="fsae_rules_2024_v1",
+            source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            embedding_model="local/model", device="cpu", overwrite=False,
+            render_dpi=300, jpeg_quality=95, builder=builder,
+        )
+    assert captured["pdf_render"] == {"dpi": 300, "quality": 95}
+
+
 def test_full_rag_rejects_a_nonlocal_reader(tmp_path: Path) -> None:
     _write_index(tmp_path)
 
